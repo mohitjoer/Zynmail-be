@@ -1,5 +1,6 @@
 import bleach
 from bleach.css_sanitizer import CSSSanitizer
+import re
 
 ALLOWED_TAGS = [
     'a', 'abbr', 'acronym', 'b', 'blockquote', 'code',
@@ -25,6 +26,10 @@ css_sanitizer = CSSSanitizer(allowed_css_properties=[
 def sanitize_email_html(html_content: str) -> str:
     if not html_content:
         return ""
+    
+    # Strip <script> blocks completely so their inner text (like JSON-LD) isn't rendered
+    html_content = re.sub(r'<script\b[^>]*>.*?</script>', '', html_content, flags=re.IGNORECASE | re.DOTALL)
+
     return bleach.clean(
         html_content,
         tags=ALLOWED_TAGS,

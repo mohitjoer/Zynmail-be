@@ -8,6 +8,7 @@ from email.message import EmailMessage
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from typing import Any
 from app.models.email import (
     EmailCreate, EmailUpdate, EmailResponse,
     EmailListResponse, EmailFolder, EmailContact
@@ -23,7 +24,8 @@ def get_gmail_service():
         with open(CREDENTIALS_FILE, 'r') as f:
             creds_data = json.load(f)
             creds = Credentials.from_authorized_user_info(creds_data)
-            return build('gmail', 'v1', credentials=creds)
+            service: Any = build('gmail', 'v1', credentials=creds)
+            return service
     except Exception:
         return None
 
@@ -38,7 +40,7 @@ async def sync_gmail_emails(db: AsyncIOMotorDatabase, max_results: int = 500):
         synced_count = 0
         
         # Sync each label category separately to ensure full coverage
-        label_groups = [
+        label_groups: list[dict[str, Any]] = [
             {'labelIds': ['INBOX'], 'includeSpamTrash': False},
             {'labelIds': ['SENT'], 'includeSpamTrash': False},
             {'labelIds': ['DRAFT'], 'includeSpamTrash': False},
@@ -164,6 +166,18 @@ def _fetch_and_build_doc(service, msg_id: str) -> dict | None:
     except Exception:
         date_obj = datetime.now(timezone.utc)
 
+    list_unsubscribe = next((h['value'] for h in headers if h['name'].lower() == 'list-unsubscribe'), '')
+    unsubscribe_link = None
+    if list_unsubscribe:
+        import re
+        urls = re.findall(r'<(https?://[^>]+)>', list_unsubscribe)
+        if urls:
+            unsubscribe_link = urls[0]
+        else:
+            mailtos = re.findall(r'<(mailto:[^>]+)>', list_unsubscribe)
+            if mailtos:
+                unsubscribe_link = mailtos[0]
+
     snippet = msg_data.get('snippet', '')
     label_ids = msg_data.get('labelIds', [])
 
@@ -252,6 +266,7 @@ def _fetch_and_build_doc(service, msg_id: str) -> dict | None:
         "attachments": attachments,
         "thread_id": msg_data.get('threadId'),
         "in_reply_to": None,
+        "unsubscribe_link": unsubscribe_link,
         "timestamp": date_obj,
     }
 
@@ -284,7 +299,7 @@ def gmail_delete_message(gmail_id: str) -> bool:
         return False
 
 
-def gmail_modify_labels(gmail_id: str, add_labels: list[str] = None, remove_labels: list[str] = None) -> bool:
+def gmail_modify_labels(gmail_id: str, add_labels: list[str] | None = None, remove_labels: list[str] | None = None) -> bool:
     """Add or remove labels from a Gmail message (used for star, read, spam, etc.)."""
     service = get_gmail_service()
     if not service:
@@ -302,7 +317,7 @@ def gmail_modify_labels(gmail_id: str, add_labels: list[str] = None, remove_labe
         return False
 
 
-def gmail_send_message(to: str, subject: str, body_text: str, cc: str = None, bcc: str = None) -> dict | None:
+def gmail_send_message(to: str, subject: str, body_text: str, cc: str | None = None, bcc: str | None = None) -> dict | None:
     """Send an email using Gmail API."""
     service = get_gmail_service()
     if not service:

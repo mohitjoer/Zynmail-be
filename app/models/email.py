@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, EmailStr
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 
@@ -44,7 +44,8 @@ class EmailDocument(BaseModel):
     attachments: list[Attachment] = []
     thread_id: Optional[str] = None
     in_reply_to: Optional[str] = None
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    unsubscribe_link: Optional[str] = None
     # Future AI fields
     ai_summary: Optional[str] = None
     ai_category: Optional[str] = None
@@ -93,6 +94,7 @@ class EmailResponse(BaseModel):
     has_attachments: bool
     attachments: list[Attachment] = []
     thread_id: Optional[str] = None
+    unsubscribe_link: Optional[str] = None
     timestamp: str
 
 

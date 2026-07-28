@@ -91,3 +91,14 @@ async def google_auth_callback(req: CodeExchangeRequest):
 @router.get("/status")
 async def auth_status():
     return {"connected": os.path.exists("user_credentials.json")}
+
+@router.post("/logout")
+async def logout():
+    try:
+        if os.path.exists("user_credentials.json"):
+            os.remove("user_credentials.json")
+        if os.path.exists("user_profile.json"):
+            os.remove("user_profile.json")
+        return {"status": "success", "message": "Logged out successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
