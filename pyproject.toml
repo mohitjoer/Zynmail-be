@@ -30,3 +30,7 @@ dev = [
     "pytest-asyncio>=1.4.0",
 ]
 
+[tool.pyright]
+include = ["app"]
+extraPaths = ["."]
+
