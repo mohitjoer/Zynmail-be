@@ -14,6 +14,7 @@ from app.models.email import (
     EmailListResponse, EmailFolder, EmailContact
 )
 from app.services.sanitizer import sanitize_email_html
+from app.services.ai_classifier import classify_email
 
 CREDENTIALS_FILE = 'user_credentials.json'
 
@@ -248,6 +249,13 @@ def _fetch_and_build_doc(service, msg_id: str) -> dict | None:
     elif 'DRAFT' in label_ids:
         folder = EmailFolder.DRAFTS
 
+    # Classify email if it's an inbox email (not sent/draft/trash)
+    ai_category = None
+    if folder == EmailFolder.INBOX:
+        ai_category = classify_email(sender=sender, subject=subject, snippet=snippet)
+        if not ai_category: 
+            ai_category = None
+
     return {
         "gmail_id": msg_id,
         "from": {"name": sender_name.replace('"', ''), "email": sender_email},
@@ -267,6 +275,7 @@ def _fetch_and_build_doc(service, msg_id: str) -> dict | None:
         "thread_id": msg_data.get('threadId'),
         "in_reply_to": None,
         "unsubscribe_link": unsubscribe_link,
+        "ai_category": ai_category,
         "timestamp": date_obj,
     }
 

@@ -27,6 +27,7 @@ def _email_doc_to_response(doc: dict) -> EmailResponse:
         has_attachments=doc.get("has_attachments", False),
         attachments=doc.get("attachments", []),
         thread_id=str(doc["thread_id"]) if doc.get("thread_id") else None,
+        ai_category=doc.get("ai_category"),
         timestamp=doc.get("timestamp", datetime.now(timezone.utc)).isoformat(),
     )
 

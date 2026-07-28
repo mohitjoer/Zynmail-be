@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
     app_name: str = "Zynmail"
     debug: bool = True
+    groq_api_key: str = ""
 
     model_config = SettingsConfigDict(env_file=".env")
 

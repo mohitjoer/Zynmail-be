@@ -95,6 +95,7 @@ class EmailResponse(BaseModel):
     attachments: list[Attachment] = []
     thread_id: Optional[str] = None
     unsubscribe_link: Optional[str] = None
+    ai_category: Optional[str] = None
     timestamp: str
 
 
