@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
-from app.services.ai_agent import app_graph
+from app.services.ai_agent import app_graph, SYSTEM_PROMPT
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -14,11 +14,7 @@ class ChatRequest(BaseModel):
 
 @router.post("")
 async def chat_with_agent(request: ChatRequest):
-    # Convert history into LangChain messages
-    lc_messages = []
-    
-    # Add a system prompt to define the agent persona
-    lc_messages.append(SystemMessage(content="You are Zyn, a highly helpful, intelligent AI assistant built into the Zynmail email client. Keep your answers concise, professional, and friendly. If users ask about their emails, let them know that feature is coming soon."))
+    lc_messages = [SystemMessage(content=SYSTEM_PROMPT)]
     
     for msg in request.messages:
         if msg.role == "user":
@@ -26,12 +22,18 @@ async def chat_with_agent(request: ChatRequest):
         elif msg.role == "assistant":
             lc_messages.append(AIMessage(content=msg.content))
             
-    # Always ensure the last message is from the user
-    # Pass to langgraph
     inputs = {"messages": lc_messages}
     result = await app_graph.ainvoke(inputs)
     
     # Extract the final AI response
-    final_message = result["messages"][-1].content
+    messages = result.get("messages", [])
+    final_message = ""
+    for m in reversed(messages):
+        if isinstance(m, AIMessage) and m.content:
+            final_message = m.content
+            break
+            
+    if not final_message and messages:
+        final_message = str(messages[-1].content) or "I have processed your request."
     
     return {"response": final_message}

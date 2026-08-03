@@ -121,6 +121,15 @@ async def sync_gmail_emails(db: AsyncIOMotorDatabase, max_results: int = 500):
                                 )
                                 synced_count += 1
                                 label_synced += 1
+                                
+                                # Run automation workflows asynchronously on newly ingested emails
+                                try:
+                                    from app.services.automation_service import process_email_automations
+                                    saved_doc = await db.emails.find_one({"gmail_id": doc["gmail_id"]})
+                                    if saved_doc:
+                                        asyncio.create_task(process_email_automations(db, saved_doc))
+                                except Exception as auto_err:
+                                    print(f"Automation trigger error: {auto_err}")
                     except Exception as e:
                         print(f"Sync error for msg {msg['id']}: {e}")
 
