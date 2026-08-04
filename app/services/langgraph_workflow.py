@@ -40,13 +40,16 @@ async def analyze_intent_node(state: WorkflowBuilderState) -> Dict[str, Any]:
     llm = _get_llm(temperature=0.1)
     prompt = state.get("prompt", "")
 
+    p_lower = prompt.lower()
+    default_act = "forward" if "forward" in p_lower else ("star" if "star" in p_lower or "flag" in p_lower else ("tag" if "tag" in p_lower else ("archive" if "archive" in p_lower else ("reply" if "reply" in p_lower or "respond" in p_lower else "forward"))))
+
     if not llm:
         return {
             "intent": {
                 "name": "Custom Email Automation",
                 "goal": prompt,
                 "raw_trigger": prompt,
-                "raw_action": "reply",
+                "raw_action": default_act,
             }
         }
 
@@ -55,7 +58,8 @@ async def analyze_intent_node(state: WorkflowBuilderState) -> Dict[str, Any]:
 2. Core intent / goal
 3. Trigger condition type (ai_condition, sender, keyword, category)
 4. Trigger value
-5. Action type (reply, forward, star, tag, archive)
+5. Action type (forward, reply, star, tag, archive)
+   CRITICAL: ONLY choose "reply" if the user explicitly requested to reply or send an auto-response. If the user asked to forward, choose "forward". If the user asked to star, choose "star". If the user asked to tag, choose "tag". If the user asked to archive, choose "archive".
 6. Any target email addresses or custom instructions
 
 Respond ONLY with valid JSON in this structure:
@@ -64,7 +68,7 @@ Respond ONLY with valid JSON in this structure:
   "goal": "Summary of what this does",
   "trigger_type": "ai_condition" | "sender" | "keyword" | "category",
   "trigger_value": "extracted condition or filter",
-  "action_type": "reply" | "forward" | "star" | "tag" | "archive",
+  "action_type": "forward" | "reply" | "star" | "tag" | "archive",
   "reply_instructions": "instructions for drafting reply if applicable",
   "forward_address": "extracted recipient email or placeholder",
   "tag_label": "tag name if applicable"
@@ -95,8 +99,8 @@ Respond ONLY with valid JSON in this structure:
                 "goal": prompt,
                 "trigger_type": "ai_condition",
                 "trigger_value": prompt,
-                "action_type": "reply",
-                "reply_instructions": "Politely acknowledge and reply to the message.",
+                "action_type": default_act,
+                "reply_instructions": "Politely acknowledge and reply to the message." if default_act == "reply" else None,
             }
         }
 
@@ -197,8 +201,8 @@ async def compile_workflow_node(state: WorkflowBuilderState) -> Dict[str, Any]:
         {
             "id": "node_evaluator",
             "type": "evaluator",
-            "label": "AI Logic Evaluator",
-            "details": "Llama 3.1 Decision Node",
+            "label": "AI Condition Check",
+            "details": "Evaluates condition criteria",
             "status": "ready"
         },
         {
@@ -212,20 +216,12 @@ async def compile_workflow_node(state: WorkflowBuilderState) -> Dict[str, Any]:
                 "Flag as Priority" if a_type == "star" else "Move to Archive"
             ),
             "status": "ready"
-        },
-        {
-            "id": "node_logger",
-            "type": "logger",
-            "label": "Execution Logger",
-            "details": "Record in History Logs",
-            "status": "ready"
         }
     ]
 
     edges = [
         {"from": "node_trigger", "to": "node_evaluator", "label": "On Ingest"},
-        {"from": "node_evaluator", "to": "node_action", "label": "Condition Matched"},
-        {"from": "node_action", "to": "node_logger", "label": "Completed"}
+        {"from": "node_evaluator", "to": "node_action", "label": "Condition Matched"}
     ]
 
     return {

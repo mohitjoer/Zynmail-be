@@ -20,11 +20,203 @@ def _get_llm(temperature: float = 0):
 
 
 from app.services.langgraph_workflow import build_workflow_with_langgraph, evaluate_rule_with_langgraph
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 
 async def generate_rule_from_ai(prompt: str) -> dict:
     """Uses a compiled LangGraph StateGraph pipeline to interpret user intent, build triggers/actions, and compile a safe automation workflow."""
     return await build_workflow_with_langgraph(prompt)
+
+
+async def chat_build_workflow(message: str, current_workflow: dict = None, graph_nodes: list = None, graph_edges: list = None, history: list = None) -> dict:
+    """Conversational AI Workflow Architect: dynamically builds, refines, and compiles LangGraph workflow DAGs based on multi-turn user conversation. Returns visual graph nodes/edges for the canvas."""
+    llm = _get_llm(temperature=0.2)
+
+    current_json = json.dumps(current_workflow or {}, indent=2)
+    nodes_json = json.dumps(graph_nodes or [], indent=2)
+    edges_json = json.dumps(graph_edges or [], indent=2)
+
+    system_prompt = f"""You are Zynmail's AI Workflow Architect. You help users build email automation workflows using LangGraph.
+
+The user chats on the left. You dynamically build a visual node-based workflow DAG on the right.
+
+CURRENT WORKFLOW SPEC:
+{current_json}
+
+CURRENT VISUAL GRAPH NODES:
+{nodes_json}
+
+CURRENT VISUAL GRAPH EDGES:
+{edges_json}
+
+YOUR CAPABILITIES:
+- Build single or multi-branch workflows based STRICTLY on what the user asks for
+- Supported triggers: "ai_condition" (semantic NLP), "sender" (email/domain), "keyword" (substring), "category" (VIP, Needs Reply, etc.)
+- Supported actions: "forward" (to email address), "star" (priority mark), "tag" (custom label), "archive" (skip inbox), "reply" (AI-drafted or template reply)
+- The first node MUST ALWAYS be "Incoming Mails" trigger (id: "node_trigger_mail")
+- You can add evaluator/router nodes that branch into action nodes
+
+CRITICAL ACTION RULES:
+1. NEVER add an action node that the user did not ask for!
+   - If the user only asks to FORWARD (e.g. "forward invoices to accounting@company.com"), create ONLY a Forward action node. DO NOT add an AI Auto-Reply node!
+   - If the user only asks to STAR / PRIORITIZE, create ONLY a Star action node. DO NOT add an AI Auto-Reply node!
+   - If the user only asks to TAG / CATEGORIZE, create ONLY a Tag action node. DO NOT add an AI Auto-Reply node!
+   - If the user only asks to ARCHIVE, create ONLY an Archive action node. DO NOT add an AI Auto-Reply node!
+   - ONLY add an "AI Auto-Reply" node if the user EXPLICITLY requested to "reply", "respond", "send a message back", or "auto-reply".
+   - If the user explicitly asks for multiple actions (e.g. "reply with receipt AND forward to accounting"), then create both action nodes.
+2. DO NOT include backend database, code, or telemetry logger nodes in the visual graph. Workflows end cleanly at their action step(s).
+3. NEVER allow email deletion or trash. If asked, politely decline and suggest archive.
+4. If the user's request is missing critical info (e.g. "forward" but no email address provided), set "needs_clarification": true and ASK the user for the missing info. Do NOT guess or invent fake email addresses.
+5. Keep messages concise, professional, and clear.
+
+You MUST respond with valid JSON in this EXACT structure:
+{{
+  "message": "Your conversational response explaining what you built or asking for clarification",
+  "needs_clarification": false,
+  "workflow": {{
+    "name": "Workflow Name",
+    "description": "What this workflow does",
+    "trigger_type": "ai_condition",
+    "trigger_value": "condition text",
+    "action_type": "forward",
+    "use_ai_reply": false,
+    "reply_prompt": "",
+    "reply_template": "",
+    "forward_to": "accounting@company.com",
+    "forward_note": "Auto-forwarded invoice",
+    "tag_name": "",
+    "is_active": true
+  }},
+  "graph_nodes": [
+    {{
+      "id": "node_trigger_mail",
+      "type": "trigger",
+      "title": "Incoming Mails",
+      "description": "Monitors incoming email stream",
+      "prompt": "Filter: Incoming emails matching criteria",
+      "color": "emerald",
+      "badge": "Trigger",
+      "metrics": "Real-time",
+      "position": {{"x": 50, "y": 170}}
+    }},
+    {{
+      "id": "node_evaluator",
+      "type": "evaluator",
+      "title": "AI Condition Check",
+      "description": "Evaluates email content against criteria",
+      "prompt": "Evaluate if the email matches condition. If true, route to action.",
+      "color": "blue",
+      "badge": "Condition",
+      "metrics": "~120ms",
+      "position": {{"x": 370, "y": 170}}
+    }},
+    {{
+      "id": "node_action_primary",
+      "type": "action",
+      "title": "Forward to Accounting",
+      "description": "Forward to accounting@company.com",
+      "prompt": "Forward the email to accounting@company.com",
+      "color": "indigo",
+      "badge": "Action",
+      "metrics": "Dispatched",
+      "position": {{"x": 690, "y": 170}}
+    }}
+  ],
+  "graph_edges": [
+    {{"from": "node_trigger_mail", "to": "node_evaluator"}},
+    {{"from": "node_evaluator", "to": "node_action_primary"}}
+  ],
+  "suggested_actions": [
+    "Test with sample email",
+    "Save & activate"
+  ]
+}}
+
+IMPORTANT NODE RULES:
+- CRITICAL: Always include the "prompt" field for every node with the exact prompt, condition criteria, or action instruction so it is displayed directly inside the node on the visual canvas!
+- node ids must be unique strings (use node_trigger_mail, node_evaluator, node_action_forward, node_action_reply, node_action_star, node_action_tag, etc.)
+- Valid colors: "emerald", "blue", "amber", "purple", "indigo", "rose", "teal", "orange"
+- Valid types: "trigger", "evaluator", "action", "condition"
+- Position the nodes in a left-to-right tree layout: triggers at x=50, evaluators at x=370, actions at x=690. For multiple action nodes, space them vertically (y=80, y=260, y=440, etc.)
+- Always include an "Incoming Mails" trigger as the first node
+- ONLY create action nodes for actions requested by the user
+- Never create backend telemetry/logger nodes on the visual canvas
+
+If needs_clarification is true, you can omit workflow, graph_nodes, and graph_edges (return empty arrays/null).
+"""
+
+    messages_list = [SystemMessage(content=system_prompt)]
+
+    if history:
+        for msg in history[-8:]:
+            if msg.get("role") == "user":
+                messages_list.append(HumanMessage(content=msg.get("content", "")))
+            elif msg.get("role") == "assistant":
+                messages_list.append(AIMessage(content=msg.get("content", "")))
+
+    messages_list.append(HumanMessage(content=f"{message}"))
+
+    if not llm:
+        # Fallback if no LLM key — use LangGraph builder
+        fallback_rule = await build_workflow_with_langgraph(message)
+        act_type = fallback_rule.get("action_type", "forward")
+        act_title = "Forward Email" if act_type == "forward" else ("Star Priority" if act_type == "star" else ("Tag Label" if act_type == "tag" else ("Archive Email" if act_type == "archive" else "AI Auto-Reply")))
+        act_prompt = fallback_rule.get("reply_prompt") or fallback_rule.get("forward_note") or f"Automated action: {act_type}"
+        return {
+            "message": f"I've designed a workflow based on your request. The nodes have been updated on the canvas.",
+            "workflow": fallback_rule,
+            "graph_nodes": [
+                {"id": "node_trigger_mail", "type": "trigger", "title": "Incoming Mails", "description": "Monitors incoming email stream", "prompt": f"Filter: {fallback_rule.get('trigger_value', message)}", "color": "emerald", "badge": "Trigger", "metrics": "Real-time", "position": {"x": 50, "y": 170}},
+                {"id": "node_evaluator", "type": "evaluator", "title": "AI Condition Check", "description": "Evaluates email content against criteria", "prompt": f"Evaluate if email matches: {fallback_rule.get('trigger_value', message)}", "color": "blue", "badge": "Condition", "metrics": "~120ms", "position": {"x": 370, "y": 170}},
+                {"id": "node_action", "type": "action", "title": act_title, "description": "Dispatches automated action", "prompt": act_prompt, "color": "indigo" if act_type == "forward" else "purple", "badge": "Action", "metrics": "Dispatched", "position": {"x": 690, "y": 170}},
+            ],
+            "graph_edges": [
+                {"from": "node_trigger_mail", "to": "node_evaluator"},
+                {"from": "node_evaluator", "to": "node_action"},
+            ],
+            "suggested_actions": ["Test with sample email", "Save & activate"],
+            "needs_clarification": False,
+        }
+
+    try:
+        response = await asyncio.to_thread(lambda: llm.invoke(messages_list))
+        raw = response.content.strip()
+        if raw.startswith("```"):
+            lines = raw.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            raw = "\n".join(lines).strip()
+
+        parsed = json.loads(raw)
+
+        # Safety check — block deletion
+        wf = parsed.get("workflow") or {}
+        if wf.get("action_type") in ["delete", "trash"]:
+            wf["action_type"] = "archive"
+            parsed["message"] += " (Note: Deletion is prohibited by safety policy; routed to archive instead.)"
+
+        # Ensure graph_nodes and graph_edges are present
+        if "graph_nodes" not in parsed:
+            parsed["graph_nodes"] = []
+        if "graph_edges" not in parsed:
+            parsed["graph_edges"] = []
+        if "needs_clarification" not in parsed:
+            parsed["needs_clarification"] = False
+
+        return parsed
+    except Exception as e:
+        print(f"Chat build workflow error: {e}")
+        fallback = await build_workflow_with_langgraph(message)
+        return {
+            "message": f"I updated the workflow for you: {message}",
+            "workflow": fallback,
+            "graph_nodes": [],
+            "graph_edges": [],
+            "suggested_actions": ["Deploy workflow"],
+            "needs_clarification": False,
+        }
 
 
 def check_ai_condition_match(condition: str, email_doc: dict) -> bool:

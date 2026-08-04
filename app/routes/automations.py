@@ -8,10 +8,13 @@ from app.models.automation import (
     AutomationRuleUpdate, 
     AutomationRuleResponse, 
     GenerateAutomationRequest,
+    ChatBuildRequest,
+    ChatBuildResponse,
     AutomationLogResponse
 )
 from app.services.automation_service import (
     generate_rule_from_ai, 
+    chat_build_workflow,
     process_email_automations
 )
 
@@ -36,6 +39,8 @@ def _doc_to_response(doc: dict) -> dict:
         "execution_count": doc.get("execution_count", 0),
         "last_executed_at": doc.get("last_executed_at"),
         "created_at": doc.get("created_at", datetime.now(timezone.utc)),
+        "graph_nodes": doc.get("graph_nodes", []),
+        "graph_edges": doc.get("graph_edges", []),
     }
 
 
@@ -71,6 +76,22 @@ async def generate_automation(req: GenerateAutomationRequest):
     
     generated_rule = await generate_rule_from_ai(req.prompt)
     return generated_rule
+
+
+@router.post("/chat-build", response_model=ChatBuildResponse)
+async def chat_build_automation(req: ChatBuildRequest):
+    """Conversational endpoint to build, edit, and refine automation workflow DAGs in real-time."""
+    if not req.message.strip():
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+    
+    result = await chat_build_workflow(
+        message=req.message,
+        current_workflow=req.current_workflow,
+        graph_nodes=req.graph_nodes,
+        graph_edges=req.graph_edges,
+        history=req.history
+    )
+    return result
 
 
 @router.put("/{rule_id}", response_model=AutomationRuleResponse)

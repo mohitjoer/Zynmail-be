@@ -13,7 +13,7 @@ class AutomationRuleCreate(BaseModel):
     # 'category' (e.g. Needs Reply, VIP, Linear, Noise)
     # 'keyword' (subject/body substring)
     trigger_type: Literal["ai_condition", "sender", "category", "keyword"] = "ai_condition"
-    trigger_value: str = Field(..., description="The condition or filter value")
+    trigger_value: str = Field(default="All incoming emails", description="The condition or filter value")
     
     # Action configuration:
     # 'reply', 'forward', 'star', 'tag', 'archive'
@@ -32,6 +32,8 @@ class AutomationRuleCreate(BaseModel):
     tag_name: Optional[str] = None
     
     is_active: bool = True
+    graph_nodes: Optional[list[dict]] = None
+    graph_edges: Optional[list[dict]] = None
 
 
 class AutomationRuleUpdate(BaseModel):
@@ -47,6 +49,8 @@ class AutomationRuleUpdate(BaseModel):
     forward_note: Optional[str] = None
     tag_name: Optional[str] = None
     is_active: Optional[bool] = None
+    graph_nodes: Optional[list[dict]] = None
+    graph_edges: Optional[list[dict]] = None
 
 
 class AutomationRuleResponse(BaseModel):
@@ -66,10 +70,29 @@ class AutomationRuleResponse(BaseModel):
     execution_count: int = 0
     last_executed_at: Optional[datetime] = None
     created_at: datetime
+    graph_nodes: Optional[list[dict]] = []
+    graph_edges: Optional[list[dict]] = []
 
 
 class GenerateAutomationRequest(BaseModel):
     prompt: str = Field(..., description="Natural language description of desired workflow")
+
+
+class ChatBuildRequest(BaseModel):
+    message: str = Field(..., description="User message/instruction to AI builder")
+    current_workflow: Optional[dict] = None
+    graph_nodes: Optional[list[dict]] = None
+    graph_edges: Optional[list[dict]] = None
+    history: Optional[list[dict]] = None
+
+
+class ChatBuildResponse(BaseModel):
+    message: str
+    workflow: Optional[dict] = None
+    graph_nodes: list[dict] = []
+    graph_edges: list[dict] = []
+    suggested_actions: list[str] = []
+    needs_clarification: bool = False
 
 
 class AutomationLogResponse(BaseModel):
