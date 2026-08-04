@@ -8,14 +8,15 @@ async def main():
     client = AsyncIOMotorClient(settings.mongodb_url)
     db = client["zynmail"]
     
-    # Get inbox emails without a category
-    cursor = db.emails.find({"folder": "inbox", "ai_category": {"$in": [None, ""]}}).sort("timestamp", -1).limit(50)
-    emails = await cursor.to_list(length=50)
+    # Get all inbox emails to re-classify with the new rules
+    cursor = db.emails.find({"folder": "inbox"}).sort("timestamp", -1)
+    emails = await cursor.to_list(length=500)
     
     print(f"Found {len(emails)} emails to categorize.")
     
+    updated_count = 0
     for email in emails:
-        sender = email.get("from", {}).get("name", "")
+        sender = f"{email.get('from', {}).get('name', '')} {email.get('from', {}).get('email', '')}"
         subject = email.get("subject", "")
         snippet = email.get("snippet", "")
         
@@ -26,9 +27,10 @@ async def main():
                 {"_id": email["_id"]},
                 {"$set": {"ai_category": category}}
             )
-            print(f"Categorized: '{subject}' -> {category}")
-        else:
-            print(f"No category for: '{subject}'")
+            updated_count += 1
+            print(f"[{category}] '{subject}' from {sender}")
+            
+    print(f"Successfully re-categorized {updated_count} emails.")
             
 if __name__ == "__main__":
     asyncio.run(main())
