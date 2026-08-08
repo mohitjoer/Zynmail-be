@@ -105,3 +105,15 @@ class AutomationLogResponse(BaseModel):
     action_executed: str
     details: Optional[str] = None
     timestamp: datetime
+
+
+class SimulateWorkflowRequest(BaseModel):
+    rule_id: Optional[str] = None
+    rule_data: Optional[dict] = None
+    email_id: Optional[str] = None
+    custom_email: Optional[dict] = None
+    live_execute: bool = False
+
+
+class RunInboxRequest(BaseModel):
+    limit: int = Field(default=20, ge=1, le=100)

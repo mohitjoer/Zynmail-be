@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     app_name: str = "Zynmail"
     debug: bool = True
     groq_api_key: str = ""
+    encryption_key: str = ""
 
     model_config = SettingsConfigDict(env_file=".env")
 

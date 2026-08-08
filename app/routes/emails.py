@@ -3,7 +3,7 @@ from typing import Optional
 
 from app.database import get_database
 from app.models.email import (
-    EmailCreate, EmailUpdate, EmailResponse, EmailListResponse
+    EmailCreate, EmailUpdate, EmailResponse, EmailListResponse, EmailThreadResponse
 )
 from app.services import email_service
 from app.services.gmail_service import sync_gmail_emails
@@ -45,6 +45,26 @@ async def get_counts():
     """Get email counts per folder."""
     db = get_database()
     return await email_service.get_folder_counts(db)
+
+
+@router.get("/thread/{thread_id}", response_model=EmailThreadResponse)
+async def get_thread_by_id(thread_id: str):
+    """Get all emails in a conversation thread by thread_id."""
+    db = get_database()
+    thread = await email_service.get_email_thread(db, thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Conversation thread not found")
+    return thread
+
+
+@router.get("/{email_id}/thread", response_model=EmailThreadResponse)
+async def get_email_thread_endpoint(email_id: str):
+    """Get all emails in the conversation thread for a given email ID."""
+    db = get_database()
+    thread = await email_service.get_email_thread(db, email_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Conversation thread not found")
+    return thread
 
 
 @router.get("/{email_id}", response_model=EmailResponse)

@@ -5,12 +5,17 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.models.email import (
     EmailCreate, EmailUpdate, EmailResponse,
-    EmailListResponse, EmailFolder, EmailContact
+    EmailListResponse, EmailThreadResponse, EmailFolder, EmailContact
 )
+from app.services.encryption_service import encrypt_email_fields, decrypt_email_fields
 
 
 def _email_doc_to_response(doc: dict) -> EmailResponse:
-    """Convert a MongoDB document to an EmailResponse."""
+    """Convert a MongoDB document to an EmailResponse with transparent decryption."""
+    doc = decrypt_email_fields(doc)
+    ts = doc.get("timestamp")
+    ts_str = ts.isoformat() if isinstance(ts, datetime) else (str(ts) if ts else datetime.now(timezone.utc).isoformat())
+
     return EmailResponse(
         id=str(doc["_id"]),
         from_contact=EmailContact(**doc["from"]),
@@ -27,8 +32,10 @@ def _email_doc_to_response(doc: dict) -> EmailResponse:
         has_attachments=doc.get("has_attachments", False),
         attachments=doc.get("attachments", []),
         thread_id=str(doc["thread_id"]) if doc.get("thread_id") else None,
+        in_reply_to=str(doc["in_reply_to"]) if doc.get("in_reply_to") else None,
+        unsubscribe_link=doc.get("unsubscribe_link"),
         ai_category=doc.get("ai_category"),
-        timestamp=doc.get("timestamp", datetime.now(timezone.utc)).isoformat(),
+        timestamp=ts_str,
     )
 
 
@@ -49,7 +56,6 @@ async def get_emails(
         label_map = {
             "inbox": "INBOX",
             "sent": "SENT",
-            "drafts": "DRAFT",
             "trash": "TRASH",
             "starred": "STARRED",
         }
@@ -61,6 +67,12 @@ async def get_emails(
             query["labels"] = {"$nin": ["TRASH"]}
         elif folder == "important":
             query["labels"] = "IMPORTANT"
+        elif folder == "drafts":
+            query["$or"] = [
+                {"labels": "DRAFT"},
+                {"labels": "DRAFTS"},
+                {"folder": "drafts"},
+            ]
         elif folder == "purchases":
             query["$or"] = [
                 {"labels": "CATEGORY_PURCHASES"},
@@ -127,28 +139,94 @@ async def get_emails(
         total=total,
         page=page,
         per_page=per_page,
-        has_more=(skip + per_page) < total,
+        has_more=(skip + len(emails)) < total,
     )
 
 
-async def get_email_by_id(db: AsyncIOMotorDatabase, email_id: str) -> Optional[EmailResponse]:
-    """Get a single email by ID."""
+async def get_email_by_id(
+    db: AsyncIOMotorDatabase,
+    email_id: str,
+) -> Optional[EmailResponse]:
+    """Get a single email by its MongoDB ObjectId."""
     try:
         doc = await db.emails.find_one({"_id": ObjectId(email_id)})
+        if not doc:
+            return None
+        return _email_doc_to_response(doc)
     except Exception:
         return None
-    if not doc:
-        return None
-    return _email_doc_to_response(doc)
+
+
+async def get_email_thread(
+    db: AsyncIOMotorDatabase,
+    email_id: str,
+) -> Optional[EmailThreadResponse]:
+    """Get all emails in the conversation thread for a given email ID."""
+    target_doc = None
+    try:
+        target_doc = await db.emails.find_one({"_id": ObjectId(email_id)})
+    except Exception:
+        pass
+
+    if not target_doc:
+        target_doc = await db.emails.find_one({"gmail_id": email_id})
+
+    if not target_doc:
+        # Check if email_id is itself a thread_id
+        thread_cursor = db.emails.find({"thread_id": email_id}).sort("timestamp", 1)
+        docs = await thread_cursor.to_list(100)
+        if not docs:
+            return None
+        emails = [_email_doc_to_response(d) for d in docs]
+        return EmailThreadResponse(
+            thread_id=email_id,
+            subject=docs[0].get("subject", ""),
+            count=len(emails),
+            emails=emails,
+        )
+
+    thread_id = target_doc.get("thread_id")
+    if not thread_id:
+        # Standalone email without thread ID
+        resp = _email_doc_to_response(target_doc)
+        return EmailThreadResponse(
+            thread_id=None,
+            subject=target_doc.get("subject", ""),
+            count=1,
+            emails=[resp],
+        )
+
+    # Find all emails sharing this thread_id
+    query: dict = {"thread_id": thread_id}
+    
+    # If the target email is not in trash, exclude trashed messages
+    if target_doc.get("folder") != "trash" and "TRASH" not in target_doc.get("labels", []):
+        query["labels"] = {"$nin": ["TRASH"]}
+
+    cursor = db.emails.find(query).sort("timestamp", 1)
+    docs = await cursor.to_list(100)
+    
+    if not docs:
+        docs = [target_doc]
+
+    emails = [_email_doc_to_response(d) for d in docs]
+    subject = target_doc.get("subject") or (docs[0].get("subject") if docs else "")
+    
+    return EmailThreadResponse(
+        thread_id=str(thread_id),
+        subject=subject,
+        count=len(emails),
+        emails=emails,
+    )
 
 
 async def create_email(
     db: AsyncIOMotorDatabase,
     email_data: EmailCreate,
-    current_user_email: str = "you@zynmail.com",
-    current_user_name: str = "You",
+    current_user_name: str = "Me",
+    current_user_email: str = "user@zynmail.com",
 ) -> EmailResponse:
-    """Create and send a new email."""
+    """Create and send a new email (or save draft)."""
     now = datetime.now(timezone.utc)
     snippet = email_data.body[:100].strip() if email_data.body else ""
 
@@ -167,34 +245,53 @@ async def create_email(
         "is_starred": False,
         "has_attachments": False,
         "attachments": [],
-        "thread_id": None,
-        "in_reply_to": None,
+        "thread_id": email_data.thread_id,
+        "in_reply_to": email_data.in_reply_to,
         "timestamp": now,
     }
 
-    # Actually send it via Gmail if not a draft
-    if not email_data.is_draft:
-        to_str = ", ".join([c.email for c in email_data.to])
-        cc_str = ", ".join([c.email for c in email_data.cc]) if email_data.cc else None
-        bcc_str = ", ".join([c.email for c in email_data.bcc]) if email_data.bcc else None
-        
+    # Handle Gmail sync for drafts or sent messages
+    to_str = ", ".join([c.email for c in email_data.to]) if email_data.to else ""
+    cc_str = ", ".join([c.email for c in email_data.cc]) if email_data.cc else None
+    bcc_str = ", ".join([c.email for c in email_data.bcc]) if email_data.bcc else None
+
+    if email_data.is_draft:
+        draft_result = gmail_create_draft(
+            to=to_str,
+            subject=email_data.subject,
+            body_text=email_data.body,
+            cc=cc_str,
+            bcc=bcc_str,
+            thread_id=email_data.thread_id,
+            in_reply_to=email_data.in_reply_to,
+        )
+        if draft_result:
+            if "message" in draft_result and "id" in draft_result["message"]:
+                doc["gmail_id"] = draft_result["message"]["id"]
+            if "id" in draft_result:
+                doc["draft_id"] = draft_result["id"]
+    else:
         send_result = gmail_send_message(
             to=to_str,
             subject=email_data.subject,
             body_text=email_data.body,
             cc=cc_str,
             bcc=bcc_str,
+            thread_id=email_data.thread_id,
+            in_reply_to=email_data.in_reply_to,
         )
         if send_result and "id" in send_result:
             doc["gmail_id"] = send_result["id"]
 
-    result = await db.emails.insert_one(doc)
+    encrypted_doc = encrypt_email_fields(doc)
+    result = await db.emails.insert_one(encrypted_doc)
     doc["_id"] = result.inserted_id
     return _email_doc_to_response(doc)
 
 
 from app.services.gmail_service import (
-    gmail_trash_message, gmail_delete_message, gmail_modify_labels, gmail_send_message
+    gmail_trash_message, gmail_delete_message, gmail_modify_labels, gmail_send_message,
+    gmail_create_draft, gmail_update_draft
 )
 
 
@@ -203,7 +300,7 @@ async def update_email(
     email_id: str,
     update_data: EmailUpdate,
 ) -> Optional[EmailResponse]:
-    """Update email properties (read, star, folder, labels) — syncs to Gmail."""
+    """Update email properties (read, star, folder, labels, or draft body) — syncs to Gmail."""
     try:
         oid = ObjectId(email_id)
     except Exception:
@@ -215,6 +312,7 @@ async def update_email(
         return None
 
     gmail_id = doc.get("gmail_id")
+    draft_id = doc.get("draft_id")
     labels = doc.get("labels", [])
 
     update_fields = {}
@@ -240,40 +338,64 @@ async def update_email(
         elif update_data.folder == "inbox":
             if "TRASH" in labels: labels.remove("TRASH")
             if "INBOX" not in labels: labels.append("INBOX")
+        elif update_data.folder == "drafts":
+            if "DRAFT" not in labels: labels.append("DRAFT")
 
     if update_data.labels is not None:
         update_fields["labels"] = update_data.labels
     else:
         update_fields["labels"] = labels
 
+    if update_data.to is not None:
+        update_fields["to"] = [c.model_dump() for c in update_data.to]
+    if update_data.cc is not None:
+        update_fields["cc"] = [c.model_dump() for c in update_data.cc]
+    if update_data.bcc is not None:
+        update_fields["bcc"] = [c.model_dump() for c in update_data.bcc]
+    if update_data.subject is not None:
+        update_fields["subject"] = update_data.subject
+    if update_data.body is not None:
+        update_fields["body"] = update_data.body
+        update_fields["snippet"] = update_data.body[:100].strip()
+    if update_data.body_html is not None:
+        update_fields["body_html"] = update_data.body_html
+
     if not update_fields:
         return await get_email_by_id(db, email_id)
 
     # Mark as pending so sync doesn't overwrite it
     update_fields["pending_gmail_sync"] = True
-    await db.emails.update_one({"_id": oid}, {"$set": update_fields})
+    encrypted_update_fields = encrypt_email_fields(update_fields)
+    await db.emails.update_one({"_id": oid}, {"$set": encrypted_update_fields})
     
     # Sync to Gmail asynchronously to avoid blocking
-    if gmail_id:
+    if gmail_id or draft_id:
         import asyncio
         
         async def run_gmail_tasks():
             try:
-                if update_data.is_read is not None:
+                if update_data.is_read is not None and gmail_id:
                     if update_data.is_read:
                         await asyncio.to_thread(gmail_modify_labels, gmail_id, None, ["UNREAD"])
                     else:
                         await asyncio.to_thread(gmail_modify_labels, gmail_id, ["UNREAD"], None)
                         
-                if update_data.is_starred is not None:
+                if update_data.is_starred is not None and gmail_id:
                     if update_data.is_starred:
                         await asyncio.to_thread(gmail_modify_labels, gmail_id, ["STARRED"], None)
                     else:
                         await asyncio.to_thread(gmail_modify_labels, gmail_id, None, ["STARRED"])
                         
-                if update_data.folder is not None:
+                if update_data.folder is not None and gmail_id:
                     if update_data.folder == "trash":
                         await asyncio.to_thread(gmail_trash_message, gmail_id)
+
+                # If it's a draft update
+                if draft_id and (update_data.subject is not None or update_data.body is not None or update_data.to is not None):
+                    to_str = ", ".join([c.email for c in (update_data.to or doc.get("to", []))])
+                    subj = update_data.subject if update_data.subject is not None else doc.get("subject", "")
+                    bdy = update_data.body if update_data.body is not None else doc.get("body", "")
+                    await asyncio.to_thread(gmail_update_draft, draft_id, to_str, subj, bdy)
             finally:
                 # Clear pending flag
                 await db.emails.update_one({"_id": oid}, {"$unset": {"pending_gmail_sync": ""}})
@@ -320,7 +442,14 @@ async def get_folder_counts(db: AsyncIOMotorDatabase) -> dict:
             "labels": {"$nin": ["TRASH"]}
         },
         "important": {"labels": {"$all": ["IMPORTANT"], "$nin": ["TRASH"]}},
-        "drafts": {"labels": {"$all": ["DRAFT"], "$nin": ["TRASH"]}},
+        "drafts": {
+            "$or": [
+                {"labels": "DRAFT"},
+                {"labels": "DRAFTS"},
+                {"folder": "drafts"}
+            ],
+            "labels": {"$nin": ["TRASH"]}
+        },
         "trash": {"labels": "TRASH"},
     }
     

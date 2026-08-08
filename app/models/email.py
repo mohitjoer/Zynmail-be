@@ -67,14 +67,22 @@ class EmailCreate(BaseModel):
     body: str
     body_html: str = ""
     is_draft: bool = False
+    thread_id: Optional[str] = None
+    in_reply_to: Optional[str] = None
 
 
 class EmailUpdate(BaseModel):
-    """Schema for updating email properties."""
+    """Schema for updating email properties and draft contents."""
     is_read: Optional[bool] = None
     is_starred: Optional[bool] = None
     folder: Optional[EmailFolder] = None
     labels: Optional[list[str]] = None
+    to: Optional[list[EmailContact]] = None
+    cc: Optional[list[EmailContact]] = None
+    bcc: Optional[list[EmailContact]] = None
+    subject: Optional[str] = None
+    body: Optional[str] = None
+    body_html: Optional[str] = None
 
 
 class EmailResponse(BaseModel):
@@ -94,6 +102,7 @@ class EmailResponse(BaseModel):
     has_attachments: bool
     attachments: list[Attachment] = []
     thread_id: Optional[str] = None
+    in_reply_to: Optional[str] = None
     unsubscribe_link: Optional[str] = None
     ai_category: Optional[str] = None
     timestamp: str
@@ -106,3 +115,11 @@ class EmailListResponse(BaseModel):
     page: int
     per_page: int
     has_more: bool
+
+
+class EmailThreadResponse(BaseModel):
+    """API response schema for a full conversation thread."""
+    thread_id: Optional[str] = None
+    subject: str = ""
+    count: int = 1
+    emails: list[EmailResponse]

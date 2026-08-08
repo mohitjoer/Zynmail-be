@@ -167,7 +167,7 @@ SEED_EMAILS = [
         "body_html": "",
         "snippet": "Draft — Investor Update Q3 2026. Key highlights: Launched AI email categorization...",
         "folder": "drafts",
-        "labels": ["important"],
+        "labels": ["DRAFT", "important"],
         "is_read": True,
         "is_starred": False,
         "has_attachments": False,

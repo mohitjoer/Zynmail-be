@@ -15,6 +15,10 @@ from app.models.email import (
 )
 from app.services.sanitizer import sanitize_email_html
 from app.services.ai_classifier import classify_email
+from app.services.encryption_service import (
+    load_encrypted_json_file, save_encrypted_json_file,
+    encrypt_email_fields, decrypt_email_fields
+)
 
 CREDENTIALS_FILE = 'user_credentials.json'
 
@@ -22,12 +26,33 @@ def get_gmail_service():
     if not os.path.exists(CREDENTIALS_FILE):
         return None
     try:
-        with open(CREDENTIALS_FILE, 'r') as f:
-            creds_data = json.load(f)
-            creds = Credentials.from_authorized_user_info(creds_data)
-            service: Any = build('gmail', 'v1', credentials=creds)
-            return service
-    except Exception:
+        creds_data = load_encrypted_json_file(CREDENTIALS_FILE)
+        if not creds_data:
+            return None
+        creds = Credentials.from_authorized_user_info(creds_data)
+        
+        # Verify token validity and refresh if expired
+        from google.auth.transport.requests import Request
+        if creds.expired or not creds.valid:
+            if creds.refresh_token:
+                try:
+                    creds.refresh(Request())
+                    save_encrypted_json_file(CREDENTIALS_FILE, json.loads(creds.to_json()))
+                except Exception as refresh_err:
+                    print(f"Gmail token refresh failed: {refresh_err}")
+                    if "invalid_grant" in str(refresh_err):
+                        try:
+                            os.remove(CREDENTIALS_FILE)
+                        except OSError:
+                            pass
+                    return None
+            else:
+                return None
+
+        service: Any = build('gmail', 'v1', credentials=creds)
+        return service
+    except Exception as e:
+        print(f"Error initializing gmail service: {e}")
         return None
 
 
@@ -114,9 +139,10 @@ async def sync_gmail_emails(db: AsyncIOMotorDatabase, max_results: int = 500):
                                 lambda: _fetch_and_build_doc(service, msg['id'])
                             )
                             if doc:
+                                encrypted_doc = encrypt_email_fields(doc)
                                 await db.emails.update_one(
                                     {"gmail_id": doc["gmail_id"]},
-                                    {"$set": doc},
+                                    {"$set": encrypted_doc},
                                     upsert=True
                                 )
                                 synced_count += 1
@@ -127,7 +153,9 @@ async def sync_gmail_emails(db: AsyncIOMotorDatabase, max_results: int = 500):
                                     from app.services.automation_service import process_email_automations
                                     saved_doc = await db.emails.find_one({"gmail_id": doc["gmail_id"]})
                                     if saved_doc:
-                                        asyncio.create_task(process_email_automations(db, saved_doc))
+                                        # Decrypt before processing automation AI nodes
+                                        decrypted_saved = decrypt_email_fields(saved_doc)
+                                        asyncio.create_task(process_email_automations(db, decrypted_saved))
                                 except Exception as auto_err:
                                     print(f"Automation trigger error: {auto_err}")
                     except Exception as e:
@@ -136,8 +164,7 @@ async def sync_gmail_emails(db: AsyncIOMotorDatabase, max_results: int = 500):
                 page_token = results.get('nextPageToken')
                 if not page_token:
                     # We reached the end of this label!
-                    # Delete any local emails in this folder that are NOT in seen_ids
-                    # First map the Gmail label to our local folder name
+                    # Only delete emails that have a gmail_id which is no longer on Gmail (preserve local-only drafts/emails)
                     label_to_folder = {
                         "INBOX": "inbox", "SENT": "sent", "DRAFT": "drafts",
                         "STARRED": "starred", "TRASH": "trash"
@@ -148,9 +175,39 @@ async def sync_gmail_emails(db: AsyncIOMotorDatabase, max_results: int = 500):
                     if local_folder:
                         await db.emails.delete_many({
                             "folder": local_folder,
-                            "gmail_id": {"$nin": list(seen_ids)}
+                            "gmail_id": {"$exists": True, "$ne": None, "$nin": list(seen_ids)}
                         })
                     break
+
+        # Dedicated sync pass for Gmail Drafts endpoint to guarantee all drafts are fetched
+        try:
+            drafts_res = await asyncio.to_thread(
+                lambda: service.users().drafts().list(userId='me', maxResults=50).execute()
+            )
+            gmail_drafts = drafts_res.get('drafts', [])
+            for d in gmail_drafts:
+                draft_msg = d.get('message')
+                if draft_msg and 'id' in draft_msg:
+                    msg_id = draft_msg['id']
+                    existing = await db.emails.find_one({"gmail_id": msg_id})
+                    if not existing:
+                        doc = await asyncio.to_thread(
+                            lambda: _fetch_and_build_doc(service, msg_id)
+                        )
+                        if doc:
+                            doc["folder"] = EmailFolder.DRAFTS
+                            if "DRAFT" not in doc.get("labels", []):
+                                doc["labels"].append("DRAFT")
+                            doc["draft_id"] = d.get("id")
+                            encrypted_doc = encrypt_email_fields(doc)
+                            await db.emails.update_one(
+                                {"gmail_id": doc["gmail_id"]},
+                                {"$set": encrypted_doc},
+                                upsert=True
+                            )
+                            synced_count += 1
+        except Exception as draft_err:
+            print(f"Draft sync notice: {draft_err}")
 
         return {"status": "success", "synced": synced_count}
     except Exception as e:
@@ -335,8 +392,16 @@ def gmail_modify_labels(gmail_id: str, add_labels: list[str] | None = None, remo
         return False
 
 
-def gmail_send_message(to: str, subject: str, body_text: str, cc: str | None = None, bcc: str | None = None) -> dict | None:
-    """Send an email using Gmail API."""
+def gmail_send_message(
+    to: str,
+    subject: str,
+    body_text: str,
+    cc: str | None = None,
+    bcc: str | None = None,
+    thread_id: str | None = None,
+    in_reply_to: str | None = None,
+) -> dict | None:
+    """Send an email using Gmail API with optional thread linking."""
     service = get_gmail_service()
     if not service:
         return None
@@ -352,10 +417,15 @@ def gmail_send_message(to: str, subject: str, body_text: str, cc: str | None = N
             message['Cc'] = cc
         if bcc:
             message['Bcc'] = bcc
+        if in_reply_to:
+            message['In-Reply-To'] = in_reply_to
+            message['References'] = in_reply_to
 
         # Encoded message
         encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
-        create_message = {'raw': encoded_message}
+        create_message: dict[str, Any] = {'raw': encoded_message}
+        if thread_id:
+            create_message['threadId'] = thread_id
 
         send_message = (
             service.users()
@@ -367,3 +437,85 @@ def gmail_send_message(to: str, subject: str, body_text: str, cc: str | None = N
     except Exception as e:
         print(f"Gmail send error: {e}")
         return None
+
+
+def gmail_create_draft(
+    to: str,
+    subject: str,
+    body_text: str,
+    cc: str | None = None,
+    bcc: str | None = None,
+    thread_id: str | None = None,
+    in_reply_to: str | None = None,
+) -> dict | None:
+    """Create a new draft in Gmail with optional thread linking."""
+    service = get_gmail_service()
+    if not service:
+        return None
+
+    try:
+        message = EmailMessage()
+        message.set_content(body_text)
+        if to:
+            message['To'] = to
+        message['From'] = 'me'
+        message['Subject'] = subject
+        if cc:
+            message['Cc'] = cc
+        if bcc:
+            message['Bcc'] = bcc
+        if in_reply_to:
+            message['In-Reply-To'] = in_reply_to
+            message['References'] = in_reply_to
+
+        encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        draft_msg_dict: dict[str, Any] = {'raw': encoded_message}
+        if thread_id:
+            draft_msg_dict['threadId'] = thread_id
+
+        create_draft_body = {'message': draft_msg_dict}
+
+        draft = (
+            service.users()
+            .drafts()
+            .create(userId="me", body=create_draft_body)
+            .execute()
+        )
+        return draft
+    except Exception as e:
+        print(f"Gmail create draft error: {e}")
+        return None
+
+
+def gmail_update_draft(draft_id: str, to: str, subject: str, body_text: str, cc: str | None = None, bcc: str | None = None) -> dict | None:
+    """Update an existing draft in Gmail."""
+    service = get_gmail_service()
+    if not service:
+        return None
+
+    try:
+        message = EmailMessage()
+        message.set_content(body_text)
+        if to:
+            message['To'] = to
+        message['From'] = 'me'
+        message['Subject'] = subject
+        if cc:
+            message['Cc'] = cc
+        if bcc:
+            message['Bcc'] = bcc
+
+        encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        update_draft_body = {'message': {'raw': encoded_message}}
+
+        draft = (
+            service.users()
+            .drafts()
+            .update(userId="me", id=draft_id, body=update_draft_body)
+            .execute()
+        )
+        return draft
+    except Exception as e:
+        print(f"Gmail update draft error: {e}")
+        return None
+

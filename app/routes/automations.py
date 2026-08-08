@@ -10,12 +10,16 @@ from app.models.automation import (
     GenerateAutomationRequest,
     ChatBuildRequest,
     ChatBuildResponse,
-    AutomationLogResponse
+    AutomationLogResponse,
+    SimulateWorkflowRequest,
+    RunInboxRequest
 )
 from app.services.automation_service import (
     generate_rule_from_ai, 
     chat_build_workflow,
-    process_email_automations
+    process_email_automations,
+    simulate_workflow_execution,
+    run_rule_on_inbox
 )
 
 router = APIRouter(prefix="/api/automations", tags=["automations"])
@@ -163,12 +167,98 @@ async def list_automation_logs(db: AsyncIOMotorDatabase = Depends(get_database))
     ]
 
 
+@router.post("/simulate")
+async def simulate_workflow(
+    req: SimulateWorkflowRequest,
+    db: AsyncIOMotorDatabase = Depends(get_database)
+):
+    """
+    Simulates or dry-runs a workflow against a specific email or sample email.
+    Returns step-by-step pipeline execution trace for the UI.
+    """
+    # 1. Resolve rule data
+    rule_data = req.rule_data or {}
+    if req.rule_id:
+        try:
+            oid = ObjectId(req.rule_id)
+            saved = await db.automations.find_one({"_id": oid})
+            if saved:
+                rule_data = saved
+        except Exception:
+            pass
+
+    if not rule_data:
+        raise HTTPException(status_code=400, detail="Workflow rule configuration is required")
+
+    # 2. Resolve email document
+    email_doc = req.custom_email
+    if not email_doc and req.email_id:
+        try:
+            email_oid = ObjectId(req.email_id)
+            email_doc = await db.emails.find_one({"_id": email_oid})
+        except Exception:
+            pass
+
+    if not email_doc:
+        # Fallback to the most recent inbox email
+        cursor = db.emails.find({"folder": "inbox"}).sort("timestamp", -1).limit(1)
+        recent_list = await cursor.to_list(length=1)
+        if recent_list:
+            email_doc = recent_list[0]
+        else:
+            # Synthetic sample email if inbox is empty
+            email_doc = {
+                "from": {"name": "Stripe Invoicing", "email": "invoices@stripe.com"},
+                "subject": "Your monthly subscription invoice #1092",
+                "body": "Hi there, your receipt for the Pro plan is attached. Amount paid: $29.00 USD.",
+                "snippet": "Receipt for Pro plan. Amount: $29.00",
+                "folder": "inbox",
+                "timestamp": datetime.now(timezone.utc)
+            }
+
+    # 3. Run simulation
+    result = await simulate_workflow_execution(
+        db=db,
+        rule=rule_data,
+        email_doc=email_doc,
+        live_execute=req.live_execute
+    )
+
+    # Attach email info to result for display
+    result["tested_email"] = {
+        "id": str(email_doc.get("_id", "sample")),
+        "subject": email_doc.get("subject", "No Subject"),
+        "sender": email_doc.get("from", {}).get("email", ""),
+        "sender_name": email_doc.get("from", {}).get("name", "")
+    }
+
+    return result
+
+
+@router.post("/{rule_id}/run-inbox")
+async def run_workflow_on_inbox(
+    rule_id: str,
+    req: RunInboxRequest = RunInboxRequest(),
+    db: AsyncIOMotorDatabase = Depends(get_database)
+):
+    """
+    Executes a saved automation rule against the latest N emails in the user's inbox.
+    """
+    try:
+        res = await run_rule_on_inbox(db=db, rule_id=rule_id, limit=req.limit)
+        return res
+    except ValueError as ve:
+        raise HTTPException(status_code=404, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to run workflow on inbox: {e}")
+
+
 @router.post("/{rule_id}/test")
 async def test_automation_rule(
     rule_id: str,
     db: AsyncIOMotorDatabase = Depends(get_database)
 ):
-    """Run an automation rule against the most recent inbox email to test execution."""
+    """Run an automation rule against the most recent inbox email with rich trace."""
     try:
         oid = ObjectId(rule_id)
     except Exception:
@@ -178,9 +268,19 @@ async def test_automation_rule(
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
 
-    recent_email = await db.emails.find_one({"folder": "inbox"})
-    if not recent_email:
-        raise HTTPException(status_code=404, detail="No emails found to test against")
+    cursor = db.emails.find({"folder": "inbox"}).sort("timestamp", -1).limit(1)
+    recent_list = await cursor.to_list(length=1)
+    if not recent_list:
+        raise HTTPException(status_code=404, detail="No inbox emails found to test against")
 
-    await process_email_automations(db, recent_email)
-    return {"message": f"Tested rule '{rule.get('name')}' against email: '{recent_email.get('subject')}'"}
+    recent_email = recent_list[0]
+    sim_result = await simulate_workflow_execution(
+        db=db,
+        rule=rule,
+        email_doc=recent_email,
+        live_execute=True
+    )
+    return {
+        "message": f"Evaluated '{rule.get('name')}' against: '{recent_email.get('subject')}'",
+        "simulation": sim_result
+    }

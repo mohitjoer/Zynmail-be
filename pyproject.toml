@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Zynmail — AI-powered mailing platform backend"
 requires-python = ">=3.13"
 dependencies = [
+    "bcrypt>=5.0.0",
     "bleach>=6.4.0",
     "fastapi>=0.140.0",
     "google-api-python-client>=2.198.0",
